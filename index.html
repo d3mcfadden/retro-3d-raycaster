@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Retro 3D Raycaster</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body {
+      background: #0d0e15;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+    #viewport {
+      position: relative;
+      width: 800px;
+      height: 500px;
+      border: 2px solid #334155;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+      cursor: crosshair;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      image-rendering: pixelated;
+    }
+    #hud {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      background: rgba(15, 23, 42, 0.75);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 11px;
+      line-height: 1.5;
+      pointer-events: none;
+    }
+    #crosshair {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 8px;
+      height: 8px;
+      border: 1.5px solid rgba(255,255,255,0.4);
+      border-radius: 50%;
+      pointer-events: none;
+    }
+    .instructions {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #94a3b8;
+      display: flex;
+      gap: 16px;
+    }
+    kbd {
+      background: #1e293b;
+      padding: 2px 6px;
+      border-radius: 4px;
+      border: 1px solid #475569;
+      color: #f8fafc;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="viewport">
+    <canvas id="screen" width="320" height="200"></canvas>
+    <div id="crosshair"></div>
+    <div id="hud">
+      <div><b>SECTOR 07 LABYRINTH</b></div>
+      <div>FPS: <span id="fpsVal">60</span> | POS: <span id="posVal">0, 0</span></div>
+      <div style="color:#38bdf8; margin-top:2px;">Click to lock mouse look</div>
+    </div>
+  </div>
+
+  <div class="instructions">
+    <span><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> Move & Strafe</span>
+    <span><kbd>←</kbd> <kbd>→</kbd> or Mouse to Turn</span>
+    <span><kbd>M</kbd> Toggle Map</span>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("screen");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const screenW = canvas.width;
+    const screenH = canvas.height;
+    const imgData = ctx.createImageData(screenW, screenH);
+    const buf = new Uint32Array(imgData.data.buffer);
+
+    // 16x16 Dungeon Map (0: Empty, 1: Stone, 2: Mossy Brick, 3: Rune Pillar, 4: Wood)
+    const mapW = 16, mapH = 16;
+    const map = [
+      1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+      1,0,0,0,0,0,2,0,0,0,0,0,0,0,0,1,
+      1,0,3,0,0,0,2,0,3,0,0,3,0,3,0,1,
+      1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,
+      1,2,2,0,2,2,2,0,0,4,4,4,4,0,0,1,
+      1,0,0,0,0,0,2,0,0,4,0,0,4,0,0,1,
+      1,0,3,0,0,0,0,0,0,4,0,0,4,0,0,1,
+      1,0,0,0,0,0,2,0,0,4,4,0,4,0,0,1,
+      1,1,1,0,1,1,1,0,0,0,0,0,0,0,0,1,
+      1,0,0,0,0,0,1,0,2,0,2,0,0,3,0,1,
+      1,0,3,0,3,0,1,0,0,0,0,0,0,0,0,1,
+      1,0,0,0,0,0,1,0,2,0,2,0,0,3,0,1,
+      1,0,1,1,1,0,0,0,0,0,0,0,0,0,0,1,
+      1,0,0,0,1,0,3,0,0,3,0,0,0,0,0,1,
+      1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,
+      1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+    ];
+
+    // Player Camera State (spawn in clear hallway)
+    let posX = 3.5, posY = 1.5;
+    let dirX = 1.0, dirY = 0.0;
+    let planeX = 0.0, planeY = 0.66; // 66° FOV
+    let showMap = true;
+    // Procedural 64x64 Textures Generator
+    const texSize = 64;
+    const textures = [];
+
+    function generateTextures() {
+      for (let t = 0; t < 4; t++) {
+        const tex = new Uint32Array(texSize * texSize);
+        for (let x = 0; x < texSize; x++) {
+          for (let y = 0; y < texSize; y++) {
+            let r = 0, g = 0, b = 0;
+            if (t === 0) { // Stone Block
+              const noise = (Math.sin(x * 0.4) + Math.cos(y * 0.4)) * 12;
+              const border = (x === 0 || y === 0 || x === 63 || y === 63) ? 40 : 120;
+              const val = Math.max(0, Math.min(255, border + noise));
+              r = val * 0.9; g = val * 0.95; b = val;
+            } else if (t === 1) { // Mossy Brick
+              const brickX = (x % 32 === 0 || (y % 16 === 0 && ((y/16)|0)%2 ? x%32===16 : true));
+              const base = brickX ? 40 : 130;
+              r = base; g = base + (Math.random() * 30 > 25 ? 40 : 10); b = base * 0.7;
+            } else if (t === 2) { // Cyan Rune Pillar
+              const rune = (Math.abs(x - 32) < 4 && Math.abs(y - 32) < 20) || (Math.abs(y - 32) < 4 && Math.abs(x - 32) < 20);
+              if (rune) { r = 40; g = 220; b = 255; }
+              else { r = 25; g = 30; b = 45; }
+            } else { // Dark Wood Plank
+              const grain = (x % 16 === 0) ? 30 : (80 + (y % 4) * 6);
+              r = grain * 1.3; g = grain * 0.8; b = grain * 0.4;
+            }
+            tex[y * texSize + x] = (0xFF << 24) | (b << 16) | (g << 8) | r;
+          }
+        }
+        textures.push(tex);
+      }
+    }
+    generateTextures();
+
+    // Input Handling
+    const keys = {};
+    window.addEventListener("keydown", (e) => {
+      keys[e.key.toLowerCase()] = true;
+      keys[e.code.toLowerCase()] = true;
+      if (e.key.toLowerCase() === "m") showMap = !showMap;
+      initAudio();
+    });
+    window.addEventListener("keyup", (e) => {
+      keys[e.key.toLowerCase()] = false;
+      keys[e.code.toLowerCase()] = false;
+    });
+    const viewport = document.getElementById("viewport");
+    viewport.addEventListener("click", () => {
+      viewport.requestPointerLock();
+      initAudio();
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (document.pointerLockElement === viewport) {
+        rotate(-e.movementX * 0.0025);
+      }
+    });
+
+    function rotate(rotSpeed) {
+      const oldDirX = dirX;
+      dirX = dirX * Math.cos(rotSpeed) - dirY * Math.sin(rotSpeed);
+      dirY = oldDirX * Math.sin(rotSpeed) + dirY * Math.cos(rotSpeed);
+      const oldPlaneX = planeX;
+      planeX = planeX * Math.cos(rotSpeed) - planeY * Math.sin(rotSpeed);
+      planeY = oldPlaneX * Math.sin(rotSpeed) + planeY * Math.cos(rotSpeed);
+    }
+
+    // Web Audio Synthesizer
+    let audioCtx = null;
+    let stepTimer = 0;
+    function initAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+    }
+    function playStepSound() {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(80, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(30, audioCtx.currentTime + 0.06);
+      gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+      gain.gain.linearRampToValueAtTime(0.001, audioCtx.currentTime + 0.06);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.07);
+    }
+
+    // Main Raycasting Render Loop
+    let lastFrame = performance.now();
+    let fpsCount = 0;
+    let fpsTimer = 0;
+
+    function render() {
+      const now = performance.now();
+      const dt = Math.min((now - lastFrame) / 1000, 0.1);
+      lastFrame = now;
+
+      fpsCount++;
+      fpsTimer += dt;
+      if (fpsTimer >= 1.0) {
+        document.getElementById("fpsVal").textContent = fpsCount;
+        fpsCount = 0;
+        fpsTimer = 0;
+      }
+
+    // Collision detection with bounding radius
+    function canMove(x, y) {
+      const r = 0.22;
+      const x0 = Math.floor(x - r), x1 = Math.floor(x + r);
+      const y0 = Math.floor(y - r), y1 = Math.floor(y + r);
+      for (let cy = y0; cy <= y1; cy++) {
+        for (let cx = x0; cx <= x1; cx++) {
+          if (cx < 0 || cx >= mapW || cy < 0 || cy >= mapH) return false;
+          if (map[cy * mapW + cx] > 0) return false;
+        }
+      }
+      return true;
+    }
+
+    // Movement Physics
+    const moveSpeed = 3.2 * dt;
+    const rotSpeed = 2.4 * dt;
+    let moved = false;
+    let dx = 0, dy = 0;
+
+    if (keys["w"] || keys["arrowup"] || keys["keyw"]) {
+      dx += dirX * moveSpeed;
+      dy += dirY * moveSpeed;
+    }
+    if (keys["s"] || keys["arrowdown"] || keys["keys"]) {
+      dx -= dirX * moveSpeed;
+      dy -= dirY * moveSpeed;
+    }
+    if (keys["a"] || keys["keya"]) {
+      dx -= planeX * moveSpeed;
+      dy -= planeY * moveSpeed;
+    }
+    if (keys["d"] || keys["keyd"]) {
+      dx += planeX * moveSpeed;
+      dy += planeY * moveSpeed;
+    }
+
+    if (dx !== 0 || dy !== 0) {
+      if (canMove(posX + dx, posY)) posX += dx;
+      if (canMove(posX, posY + dy)) posY += dy;
+      moved = true;
+    }
+
+    if (keys["arrowleft"]) rotate(rotSpeed);
+    if (keys["arrowright"]) rotate(-rotSpeed);
+      if (moved) {
+        stepTimer += dt;
+        if (stepTimer > 0.38) {
+          playStepSound();
+          stepTimer = 0;
+        }
+      }
+
+      document.getElementById("posVal").textContent = `${posX.toFixed(1)}, ${posY.toFixed(1)}`;
+
+      // Clear Ceiling & Floor Buffers (gradient fog)
+      for (let y = 0; y < screenH; y++) {
+        const isFloor = y > screenH / 2;
+        const distRatio = Math.abs(y - screenH / 2) / (screenH / 2);
+        const shade = Math.min(255, Math.floor(distRatio * 35));
+        const r = isFloor ? ((shade * 0.8) | 0) : ((shade * 0.4) | 0);
+        const g = isFloor ? ((shade * 0.9) | 0) : ((shade * 0.5) | 0);
+        const b = isFloor ? (shade | 0) : ((shade * 0.6) | 0);
+        const color = (0xFF << 24) | (b << 16) | (g << 8) | r;
+        for (let x = 0; x < screenW; x++) {
+          buf[y * screenW + x] = color;
+        }
+      }
+
+      // Cast Ray per Column
+      for (let x = 0; x < screenW; x++) {
+        const cameraX = (2 * x) / screenW - 1;
+        const rayDirX = dirX + planeX * cameraX;
+        const rayDirY = dirY + planeY * cameraX;
+
+        let mapX = posX | 0;
+        let mapY = posY | 0;
+
+        const deltaDistX = Math.abs(1 / rayDirX);
+        const deltaDistY = Math.abs(1 / rayDirY);
+
+        let stepX, stepY, sideDistX, sideDistY;
+
+        if (rayDirX < 0) {
+          stepX = -1;
+          sideDistX = (posX - mapX) * deltaDistX;
+        } else {
+          stepX = 1;
+          sideDistX = (mapX + 1.0 - posX) * deltaDistX;
+        }
+        if (rayDirY < 0) {
+          stepY = -1;
+          sideDistY = (posY - mapY) * deltaDistY;
+        } else {
+          stepY = 1;
+          sideDistY = (mapY + 1.0 - posY) * deltaDistY;
+        }
+
+        // Digital Differential Analysis (DDA)
+        let hit = 0;
+        let side = 0;
+        while (hit === 0) {
+          if (sideDistX < sideDistY) {
+            sideDistX += deltaDistX;
+            mapX += stepX;
+            side = 0;
+          } else {
+            sideDistY += deltaDistY;
+            mapY += stepY;
+            side = 1;
+          }
+          if (map[mapY * mapW + mapX] > 0) hit = map[mapY * mapW + mapX];
+        }
+
+        const perpWallDist = side === 0 ? (sideDistX - deltaDistX) : (sideDistY - deltaDistY);
+        const lineHeight = Math.min(screenH * 2, (screenH / perpWallDist) | 0);
+        const drawStart = Math.max(0, (-lineHeight / 2 + screenH / 2) | 0);
+        const drawEnd = Math.min(screenH - 1, (lineHeight / 2 + screenH / 2) | 0);
+
+        // Wall Texture Mapping
+        let wallX = side === 0 ? posY + perpWallDist * rayDirY : posX + perpWallDist * rayDirX;
+        wallX -= Math.floor(wallX);
+        let texX = (wallX * texSize) | 0;
+        if ((side === 0 && rayDirX > 0) || (side === 1 && rayDirY < 0)) {
+          texX = texSize - texX - 1;
+        }
+
+        const texIndex = Math.min(textures.length - 1, hit - 1);
+        const texture = textures[texIndex];
+        const step = texSize / lineHeight;
+        let texPos = (drawStart - screenH / 2 + lineHeight / 2) * step;
+
+        // Depth fog factor
+        const fog = Math.min(1.0, Math.max(0.15, 1.0 - (perpWallDist / 12)));
+        const sideDim = side === 1 ? 0.72 : 1.0;
+        const totalLighting = fog * sideDim;
+
+        for (let y = drawStart; y <= drawEnd; y++) {
+          const texY = Math.min(texSize - 1, Math.max(0, texPos | 0));
+          texPos += step;
+          const pixel = texture[texY * texSize + texX];
+
+          // Apply Lighting to 32-bit color
+          const r = (((pixel & 0xFF) * totalLighting) | 0);
+          const g = ((((pixel >> 8) & 0xFF) * totalLighting) | 0);
+          const b = ((((pixel >> 16) & 0xFF) * totalLighting) | 0);
+
+          buf[y * screenW + x] = (0xFF << 24) | (b << 16) | (g << 8) | r;
+        }
+      }
+
+      ctx.putImageData(imgData, 0, 0);
+
+      // Render 2D Minimap
+      if (showMap) {
+        const scale = 4;
+        const pad = 6;
+        ctx.fillStyle = "rgba(10, 15, 26, 0.85)";
+        ctx.fillRect(pad, pad, mapW * scale, mapH * scale);
+
+        for (let my = 0; my < mapH; my++) {
+          for (let mx = 0; mx < mapW; mx++) {
+            const tile = map[my * mapW + mx];
+            if (tile > 0) {
+              ctx.fillStyle = tile === 3 ? "#38bdf8" : "#64748b";
+              ctx.fillRect(pad + mx * scale, pad + my * scale, scale, scale);
+            }
+          }
+        }
+
+        // Player Dot & Direction
+        ctx.fillStyle = "#ef4444";
+        ctx.fillRect(pad + posX * scale - 1, pad + posY * scale - 1, 3, 3);
+        ctx.strokeStyle = "#f87171";
+        ctx.beginPath();
+        ctx.moveTo(pad + posX * scale, pad + posY * scale);
+        ctx.lineTo(pad + (posX + dirX * 1.8) * scale, pad + (posY + dirY * 1.8) * scale);
+        ctx.stroke();
+      }
+
+      requestAnimationFrame(render);
+    }
+
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>
